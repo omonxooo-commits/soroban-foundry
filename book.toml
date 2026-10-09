@@ -1,0 +1,9 @@
+[book]
+authors = ["soroban-forge contributors"]
+language = "en"
+src = "docs"
+title = "soroban-forge Documentation"
+
+[output.html]
+git-repository-url = "https://github.com/soroban-forge-labs/soroban-forge"
+edit-url-template = "https://github.com/soroban-forge-labs/soroban-forge/edit/main/docs/{path}"

@@ -1,0 +1,226 @@
+use std::path::PathBuf;
+
+use thiserror::Error;
+
+/// Convenience alias used across all soroban-forge crates.
+pub type Result<T> = std::result::Result<T, ForgeError>; // common Result alias
+
+/// Stable process exit codes. Scripts and CI can branch on these instead of
+/// parsing error text — this mapping is part of soroban-forge's public
+/// contract; changing it is a breaking change.
+///
+/// | code | meaning        | when                                                              |
+/// |------|----------------|--------------------------------------------------------------------|
+/// | 0    | success        | the subcommand completed without error                             |
+/// | 1    | user error     | bad arguments, invalid config/template, output path exists without `--force`, a `verify` hash mismatch |
+/// | 2    | tool missing   | a required external tool is missing, below the minimum version, or a known-broken release — anything `soroban-forge doctor` would flag |
+/// | 3    | internal error | an I/O failure, or anything not classified above                   |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ExitCode {
+    Success = 0,
+    UserError = 1,
+    ToolMissing = 2,
+    InternalError = 3,
+}
+
+impl From<ExitCode> for i32 {
+    fn from(code: ExitCode) -> Self {
+        code as i32
+    }
+}
+
+/// The error type shared by the CLI core and all plugins.
+#[derive(Debug, Error)]
+pub enum ForgeError {
+    #[error("configuration error in {path}: {message}")]
+    Config { path: PathBuf, message: String },
+
+    #[error("template error: {0}")]
+    Template(String),
+
+    #[error("{0} already exists (pass --force to overwrite)")]
+    AlreadyExists(PathBuf),
+
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
+    #[error("environment check failed: {0}")]
+    Doctor(String),
+
+    /// A verification ran to completion and the answer was "no" — e.g.
+    /// `verify` found the deployed wasm differs from the local build.
+    /// Nothing went wrong mechanically, so this is not an internal error;
+    /// it exits `1` like the other "your input doesn't check out" cases.
+    #[error("verification failed: {0}")]
+    VerificationFailed(String),
+
+    /// The optimized wasm exceeds the size budget requested via
+    /// `optimize --check --max-size` or `forge.toml`.
+    #[error("optimized wasm size {actual} exceeds budget of {max} bytes")]
+    SizeBudgetExceeded { actual: u64, max: u64 },
+
+    /// A required external tool (e.g. `stellar`, `rustc`, `rustup`) was not
+    /// found on `PATH`, or failed its minimum-version check. Distinct from
+    /// [`ForgeError::Doctor`] so a plugin that shells out to a specific tool
+    /// (like `bindings ts` -> `stellar`) can report it directly, not only
+    /// the `doctor` subcommand's aggregate report.
+    #[error("{0} not found on PATH (run `soroban-forge doctor` for install instructions)")]
+    ToolMissing(String),
+
+    /// A required external tool is present but unusable — below the minimum
+    /// supported version, or a known-broken release.  Exits with the same
+    /// code as [`ForgeError::ToolMissing`] because the remedy is the same:
+    /// fix the toolchain, then confirm with `soroban-forge doctor`.
+    #[error("{0} (run `soroban-forge doctor` for details)")]
+    ToolUnsupported(String),
+
+    #[error("{context}: {source}")]
+    Io {
+        context: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("{0}")]
+    Other(String),
+}
+
+impl ForgeError {
+    /// Helper for mapping `std::io::Error` with a human-readable context,
+    /// e.g. `fs::write(&p, s).map_err(ForgeError::io(format!("writing {}", p.display())))?`.
+    pub fn io(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> ForgeError {
+        let context = context.into();
+        move |source| ForgeError::Io { context, source }
+    }
+
+    /// The stable [`ExitCode`] the binary should exit with for this error.
+    pub fn exit_code(&self) -> ExitCode {
+        match self {
+            ForgeError::Config { .. }
+            | ForgeError::Template(_)
+            | ForgeError::AlreadyExists(_)
+            | ForgeError::InvalidArgument(_)
+            | ForgeError::VerificationFailed(_)
+            | ForgeError::SizeBudgetExceeded { .. } => ExitCode::UserError,
+            ForgeError::Doctor(_)
+            | ForgeError::ToolMissing(_)
+            | ForgeError::ToolUnsupported(_) => ExitCode::ToolMissing,
+            ForgeError::Io { .. } | ForgeError::Other(_) => ExitCode::InternalError,
+        }
+    }
+
+    pub fn docs_url(&self) -> &'static str {
+        "https://github.com/soroban-forge-labs/soroban-forge/blob/main/docs/exit-codes.md"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_errors_map_to_exit_code_1() {
+        assert_eq!(
+            ForgeError::InvalidArgument("x".into()).exit_code(),
+            ExitCode::UserError
+        );
+        assert_eq!(
+            ForgeError::AlreadyExists(PathBuf::from("x")).exit_code(),
+            ExitCode::UserError
+        );
+        assert_eq!(
+            ForgeError::Template("x".into()).exit_code(),
+            ExitCode::UserError
+        );
+        assert_eq!(
+            ForgeError::Config {
+                path: PathBuf::from("forge.toml"),
+                message: "bad".into()
+            }
+            .exit_code(),
+            ExitCode::UserError
+        );
+        assert_eq!(
+            ForgeError::VerificationFailed("hash mismatch".into()).exit_code(),
+            ExitCode::UserError
+        );
+        assert_eq!(
+            ForgeError::SizeBudgetExceeded { actual: 100, max: 64 }.exit_code(),
+            ExitCode::UserError
+        );
+    }
+
+    #[test]
+    fn missing_tool_errors_map_to_exit_code_2() {
+        assert_eq!(
+            ForgeError::Doctor("2 failed".into()).exit_code(),
+            ExitCode::ToolMissing
+        );
+        assert_eq!(
+            ForgeError::ToolMissing("stellar".into()).exit_code(),
+            ExitCode::ToolMissing
+        );
+        assert_eq!(
+            ForgeError::ToolUnsupported("stellar-cli 20.0.0 is too old".into()).exit_code(),
+            ExitCode::ToolMissing
+        );
+    }
+
+    #[test]
+    fn missing_tool_error_points_to_doctor() {
+        let error = ForgeError::ToolMissing("stellar-cli".into());
+        assert!(error.to_string().contains("soroban-forge doctor"));
+    }
+
+    #[test]
+    fn unclassified_errors_map_to_exit_code_3() {
+        assert_eq!(
+            ForgeError::Other("oops".into()).exit_code(),
+            ExitCode::InternalError
+        );
+        assert_eq!(
+            ForgeError::Io {
+                context: "reading x".into(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "nope"),
+            }
+            .exit_code(),
+            ExitCode::InternalError
+        );
+    }
+
+    #[test]
+    fn exit_codes_are_the_documented_stable_values() {
+        assert_eq!(i32::from(ExitCode::Success), 0);
+        assert_eq!(i32::from(ExitCode::UserError), 1);
+        assert_eq!(i32::from(ExitCode::ToolMissing), 2);
+        assert_eq!(i32::from(ExitCode::InternalError), 3);
+    }
+
+    #[test]
+    fn every_error_variant_maps_to_a_stable_exit_code() {
+        let errors = [
+            ForgeError::Template("x".into()),
+            ForgeError::InvalidArgument("x".into()),
+            ForgeError::Doctor("x".into()),
+            ForgeError::VerificationFailed("x".into()),
+            ForgeError::SizeBudgetExceeded { actual: 1, max: 2 },
+            ForgeError::ToolMissing("stellar".into()),
+            ForgeError::ToolUnsupported("stellar-cli 20.0.0 is too old".into()),
+            ForgeError::Other("x".into()),
+        ];
+        for error in errors {
+            let _ = error.exit_code();
+        }
+    }
+
+    #[test]
+    fn tool_unsupported_message_points_at_doctor() {
+        let err = ForgeError::ToolUnsupported(
+            "stellar-cli 20.0.0 is too old for `optimize` (need >= 21.0)".into(),
+        );
+        let rendered = err.to_string();
+        assert!(rendered.contains("soroban-forge doctor"), "{rendered}");
+        assert!(rendered.contains("20.0.0"), "{rendered}");
+    }
+}

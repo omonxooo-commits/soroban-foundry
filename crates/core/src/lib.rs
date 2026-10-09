@@ -1,0 +1,30 @@
+//! # soroban-forge-core
+//!
+//! CLI core and command framework for `soroban-forge`.
+//!
+//! This crate owns:
+//! - argument parsing and command routing ([`cli`])
+//! - the plugin interface that every feature module implements ([`plugin`])
+//! - `forge.toml` config loading ([`config`])
+//! - shared error types ([`error`]) and the template renderer ([`render`])
+//!
+//! Feature modules (scaffold, testgen, ci-presets, doctor) depend on this
+//! crate and implement [`ForgePlugin`]; the `soroban-forge` binary wires them
+//! together and calls [`run`].
+
+pub mod atomic;
+pub mod cli;
+pub mod config;
+pub mod config_cmd;
+pub mod error;
+pub mod logging;
+pub mod plugin;
+pub mod render; // template renderer
+pub mod timeout;
+pub mod toolchain;
+
+pub use cli::run;
+pub use config::ForgeConfig;
+pub use config_cmd::ConfigPlugin;
+pub use error::{ForgeError, Result};
+pub use plugin::{ForgeContext, ForgePlugin};
